@@ -1,0 +1,16 @@
+{
+  "name": "key-area-calibrator",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --onefile"
+  },
+  "dependencies": {
+    "node-global-key-listener": "^0.1.1"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  }
+}

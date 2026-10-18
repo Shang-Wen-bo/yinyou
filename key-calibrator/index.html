@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>键盘分区校准器</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: system-ui, sans-serif;
+    }
+    html, body {
+      height: 100vh;
+      overflow: hidden;
+      background: #111;
+      color: #fff;
+    }
+    .vertical-bar-wrap {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+    .v-bar {
+      flex: 1;
+      height: 100%;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      font-weight: bold;
+      color: #222;
+    }
+    .v-bar[data-area="1"] { background-color: #ff4444; }
+    .v-bar[data-area="2"] { background-color: #44ff44; }
+    .v-bar[data-area="3"] { background-color: #4488ff; }
+    .v-bar[data-area="4"] { background-color: #ffaa44; }
+    .v-bar.inactive { opacity: 0.2; }
+    .v-bar.active { opacity: 1; }
+    .v-bar.flash { filter: brightness(1.6); }
+
+    .ui-panel {
+      position: relative;
+      z-index: 2;
+      padding: 24px;
+      pointer-events: none;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .tip-box {
+      background: rgba(0,0,0,0.75);
+      padding: 1.5rem;
+      border-radius: 10px;
+      margin-bottom: 1rem;
+      font-size: 18px;
+      line-height: 1.7;
+      max-width: 720px;
+      pointer-events: auto;
+    }
+    .control-group {
+      margin-bottom: 1rem;
+      pointer-events: auto;
+    }
+    button {
+      padding: 10px 16px;
+      font-size: 15px;
+      margin: 4px;
+      cursor: pointer;
+    }
+    #log {
+      background: rgba(0,0,0,0.75);
+      padding: 1rem;
+      border-radius: 8px;
+      height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 14px;
+      max-width: 720px;
+      pointer-events: auto;
+    }
+    #fileInput {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+<div class="vertical-bar-wrap">
+  <div class="v-bar" data-area="1">分区1</div>
+  <div class="v-bar" data-area="2">分区2</div>
+  <div class="v-bar" data-area="3">分区3</div>
+  <div class="v-bar" data-area="4">分区4</div>
+</div>
+
+<div class="ui-panel">
+  <div class="tip-box">
+    <div>当前状态：<span id="statusText">等待开始校准</span></div>
+    <div id="hintText">点击【开始校准】采集按键；开启全局拦截可拦截Win/音量/CapsLock</div>
+  </div>
+
+  <div class="control-group">
+    <button id="startBtn">开始校准</button>
+    <button id="nextAreaBtn" disabled>下一区域</button>
+    <button id="finishBtn">完成校准</button>
+    <button id="testBtn">测试模式</button>
+    <button id="saveJsonBtn">保存JSON</button>
+    <button id="loadJsonBtn">读取JSON</button>
+    <button id="globalBlockBtn">开启全局按键拦截</button>
+    <input type="file" id="fileInput" accept=".json">
+  </div>
+
+  <div id="log"></div>
+</div>
+
+<script>
+  const { ipcRenderer } = require('electron');
+
+  const state = {
+    calibrating: false,
+    currentArea: null,
+    mapping: {},
+    testMode: false
+  };
+
+  const vBars = document.querySelectorAll('.v-bar');
+  const statusText = document.getElementById('statusText');
+  const hintText = document.getElementById('hintText');
+  const logEl = document.getElementById('log');
+
+  const startBtn = document.getElementById('startBtn');
+  const nextAreaBtn = document.getElementById('nextAreaBtn');
+  const finishBtn = document.getElementById('finishBtn');
+  const testBtn = document.getElementById('testBtn');
+  const saveJsonBtn = document.getElementById('saveJsonBtn');
+  const loadJsonBtn = document.getElementById('loadJsonBtn');
+  const fileInput = document.getElementById('fileInput');
+  const globalBlockBtn = document.getElementById('globalBlockBtn');
+
+  let globalBlockOn = false;
+
+  // 接收主进程全局拦截日志
+  ipcRenderer.on('global-block-log', (_, keyName) => {
+    addLog(`🚫【全局钩子拦截】${keyName}`);
+  });
+
+  function renderBars() {
+    vBars.forEach(bar => {
+      const areaNum = Number(bar.dataset.area);
+      bar.classList.remove('active', 'inactive');
+      if(state.testMode) return;
+      if(areaNum === state.currentArea){
+        bar.classList.add('active');
+      }else{
+        bar.classList.add('inactive');
+      }
+    })
+  }
+
+  function addLog(text){
+    const div = document.createElement('div');
+    div.textContent = text;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // 窗口内按键监听
+  document.addEventListener('keydown', (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+
+    const keyCode = e.code;
+    const keyName = e.key;
+    addLog(`按下按键 code="${keyCode}" | key="${keyName}"`);
+
+    if(state.testMode){
+      const targetAreas = state.mapping[keyCode];
+      if(targetAreas){
+        targetAreas.forEach(area => {
+          const bar = document.querySelector(`.v-bar[data-area="${area}"]`);
+          bar.classList.add('flash');
+          setTimeout(()=> bar.classList.remove('flash'),150);
+        })
+      }
+      return;
+    }
+
+    if(!state.calibrating || state.currentArea === null) return;
+
+    // 冲突检测：该按键是否已绑定其他分区
+    let existArea = null;
+    for(const code in state.mapping){
+      if(code === keyCode){
+        existArea = state.mapping[code][0];
+        break;
+      }
+    }
+    if(existArea !== null && existArea !== state.currentArea){
+      addLog(`⚠️ 冲突警告：【${keyCode}】已绑定分区${existArea}，禁止重复绑定！`);
+      return;
+    }
+
+    if(!state.mapping[keyCode]) state.mapping[keyCode] = [];
+    if(!state.mapping[keyCode].includes(state.currentArea)){
+      state.mapping[keyCode].push(state.currentArea);
+      addLog(`✅ 绑定成功：code【${keyCode}】→ 分区${state.currentArea}`);
+    }
+  });
+
+  document.addEventListener('keyup', (e)=>{
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  });
+
+  // 全局拦截开关
+  globalBlockBtn.onclick = () => {
+    globalBlockOn = !globalBlockOn;
+    ipcRenderer.send('set-global-block', globalBlockOn);
+    globalBlockBtn.textContent = globalBlockOn ? "关闭全局按键拦截" : "开启全局按键拦截";
+    addLog(globalBlockOn ? "✅ 全局系统按键拦截已启用" : "❌ 全局拦截关闭");
+  }
+
+  startBtn.onclick = () => {
+    state.calibrating = true;
+    state.testMode = false;
+    state.currentArea = 1;
+    state.mapping = {};
+    statusText.textContent = "校准中";
+    hintText.textContent = `分区1：按下所有属于本区域的按键，完成后点【下一区域】`;
+    nextAreaBtn.disabled = false;
+    renderBars();
+    addLog("==== 开始校准，当前：分区1 ====");
+  }
+
+  nextAreaBtn.onclick = () => {
+    state.currentArea += 1;
+    if(state.currentArea > 4){
+      state.calibrating = false;
+      state.currentArea = null;
+      statusText.textContent = "校准完成";
+      hintText.textContent = "4个分区全部采集完毕，可保存JSON";
+      nextAreaBtn.disabled = true;
+      renderBars();
+      addLog("==== 全部4个分区校准结束 ====");
+      return;
+    }
+    statusText.textContent = "校准中";
+    hintText.textContent = `分区${state.currentArea}：按下属于本区域按键，完成后点【下一区域】`;
+    renderBars();
+    addLog(`==== 切换至分区${state.currentArea} ====`);
+  }
+
+  finishBtn.onclick = () => {
+    state.calibrating = false;
+    state.testMode = false;
+    state.currentArea = null;
+    statusText.textContent = "空闲";
+    hintText.textContent = "校准已停止，可测试、保存或读取映射";
+    nextAreaBtn.disabled = true;
+    renderBars();
+    addLog("==== 手动结束校准 ====");
+  }
+
+  testBtn.onclick = () => {
+    state.testMode = true;
+    state.calibrating = false;
+    state.currentArea = null;
+    statusText.textContent = "测试模式";
+    hintText.textContent = "按下按键，对应竖彩条闪烁";
+    nextAreaBtn.disabled = true;
+    renderBars();
+    addLog("==== 进入测试模式 ====");
+  }
+
+  saveJsonBtn.onclick = () => {
+    const jsonStr = JSON.stringify(state.mapping, null, 2);
+    const blob = new Blob([jsonStr], {type:"application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = "keyboard-area-map.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    addLog("💾 JSON映射文件已下载：keyboard-area-map.json");
+  }
+
+  loadJsonBtn.onclick = () => {
+    fileInput.click();
+  }
+  fileInput.onchange = (event) => {
+    const file = event.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e){
+      try{
+        const loadedMap = JSON.parse(e.target.result);
+        state.mapping = loadedMap;
+        addLog("📂 成功读取按键映射JSON文件");
+        statusText.textContent = "已加载映射";
+        hintText.textContent = "映射载入完成，可以进入测试模式";
+      }catch(err){
+        addLog("❌ JSON解析失败：" + err.message);
+      }
+    }
+    reader.readAsText(file);
+    fileInput.value = "";
+  }
+</script>
+</body>
+</html>
